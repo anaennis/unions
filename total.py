@@ -1,49 +1,79 @@
-from vos import Client
 import argparse
 import time
 import numpy as np
 import os
-from astropy.io import fits
-import re
-from astropy.coordinates import SkyCoord
-import pandas as pd
-from astropy.table import hstack,Table
-from astropy import units as u
-from astropy.wcs import WCS
-from scipy.ndimage.filters import median_filter
 import shutil
 import logging
-import subprocess
+from astropy.io import fits
+from astropy.wcs import WCS
+from scipy.ndimage import median_filter
+import pandas as pd
 import matplotlib.pyplot as plt
 
-# Set up logging configuration
-log_filename = 'download_log.txt'
-logging.basicConfig(filename=log_filename, level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
+# Import the CONFIGuration file
+import CONFIG
+
+# Set up logging CONFIGuration
+logging.basicCONFIG(filename=CONFIG.LOG_FILENAME, level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s: %(message)s')
 
 
-# this function checks if the galaxy is in an existing tile and returns the name of the tile:
+# Helper functions
 
-def in_UNIONS(RA_input, DEC_input, listing, v=True):
-    # units of input in degrees
-    # listing is the name of the file containing the list of tiles
+def setup_directories(folder_name):
+    """Creates the main data folder and the plots directory if they don't exist."""
+    try:
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)
+            logging.info(f"Created data folder: {folder_name}")
+        
+        plot_dir = 'plots'
+        if not os.path.exists(plot_dir):
+            os.makedirs(plot_dir)
+            logging.info(f"Created plots folder: {plot_dir}")
+            
+    except Exception as e:
+        logging.error(f"Failed to create directories: {e}")
+        raise
+
+
+
+def in_UNIONS(RA_input, DEC_input, listing_file):
+    """
+    Checks if a galaxy's coordinates fall within an existing CFIS/UNIONS tile.
+
+    Parameters
+    ----------
+    ra_input : float
+        Right Ascension of the target (degrees).
+    dec_input : float
+        Declination of the target (degrees).
+    listing_file : str
+        Filename containing the list of UNIONS tiles.
+
+    Returns
+    -------
+    tuple
+        (check_if_tile: bool, xxx_cen: int, yyy_cen: int)
+    """
+
+    # Load tile list
+
+    try:
+        tiles = np.loadtxt(listing_file, dtype=str)
+    except FileNotFoundError:
+        logging.error(f"Tile listing file not found: {listing_file}")
+        return False, 0, 0
     
-    # i dont remember what this command was for CHECK IF DELETE
-    #os.system('export PATH="${HOME}/.local/bin:${PATH}"')
 
-    tiles_file_location = ''
-    tiles_file_name = listing
-    tiles = np.loadtxt(tiles_file_location + tiles_file_name, dtype=str)
-    
-    xxx_cen = 0
-    yyy_cen = 0
-
-    # separate name in set of xxx and yyy int:
-    
+    # Calculate tile centers and distance
     xxx = np.empty(len(tiles), dtype=int)
     yyy = np.empty(len(tiles), dtype=int)
     distance = np.empty(len(tiles), dtype=float)
     DEC_cen = np.empty(len(tiles),dtype=float)
     RA_cen = np.empty(len(tiles),dtype=float)
+
+
     for ii in range(len(tiles)):
         xxx[ii], yyy[ii] = np.array(tiles[ii].split('.'), dtype=int)
         
@@ -51,523 +81,501 @@ def in_UNIONS(RA_input, DEC_input, listing, v=True):
         RA_cen[ii] = xxx[ii] / (2 * np.cos(DEC_cen[ii] * np.pi / 180))
 
         distance[ii] = np.sqrt(np.power((DEC_input-DEC_cen[ii]),2)+np.power((RA_input-RA_cen[ii]),2))
-      #  print(RA_cen,DEC_cen,RA_input,DEC_input,distance)
 
     ch = np.where(distance==min(distance))
-    
-    xxx_cen = xxx[ch]
-    yyy_cen = yyy[ch]
-    d = distance[ch]
-    check_if_tile = False    
-    
-    if(min(distance)<0.5):
-       check_if_tile = True       
+        
+    # Use [0] since np.where returns an array of indices
+    xxx_cen = xxx[ch][0]
+    yyy_cen = yyy[ch][0]
+
+    # Use [0] since np.where returns an array of indices
+
+    check_if_tile = np.min(distance) < 0.5    
        
     return check_if_tile,xxx_cen,yyy_cen
 
-# this function makes use of the previous one to create folder named CFIS.XXX.YYY and download the tiles in whichever filter exists
-def download(coords_ra,coords_dec):
-    # ra dec units in deg
-    coords_ra = float(coords_ra)
-    coords_dec = float(coords_dec)
+# -- Main Pipeline Stages -- 
 
-    # first check is in DR5
-    # commented lines for g and i, should rethink this
+def download_data(ra, dec, xxx_input, yyy_input, folder):
+    """
+    Downloads CFIS tiles using vcp (VOSpace client).
     
-    check = in_UNIONS(coords_ra, coords_dec,listing='UNIONS_CFIS_LSB_r_DR5.txt')
-    if(check[0]==False):
-        logging.info(f'{coords_ra,coords_dec} not in UNIONS')
-
-    if(check[0]):
-        xxx_input = int(check[1])
-        yyy_input = int(check[2])
-
-        xxx_input = '{:03d}'.format(xxx_input)
-        yyy_input = '{:03d}'.format(yyy_input)
-
-
+    Parameters
+    ----------
+    ra : float
+        Right Ascension (deg).
+    dec : float
+        Declination (deg).
+    xxx_input : str
+        Tile RA index (formatted '000').
+    yyy_input : str
+        Tile DEC index (formatted '000').
+    folder : str
+        Local directory path for the downloads.
         
-        if yyy_input==0:
-            yyy_input = '000'
-        folder = '../CFIS.{}.{}'.format(xxx_input,yyy_input)
-        os.makedirs(folder)
+    Raises
+    ------
+    subprocess.CalledProcessError
+        If VOSpace download or local file check fails.
+    """
+    logging.info(f"Attempting download for tile CFIS.{xxx_input}.{yyy_input}")
+    
+        file_u = f'CFIS.{xxx_input}.{yyy_input}.u.fits'
+    file_r = f'CFIS.{xxx_input}.{yyy_input}.r.fits'
+    file_g_whigs = f'calexp-CFIS_{xxx_input}_{yyy_input}.fits' 
+    file_g_final = f'CFIS.{xxx_input}.{yyy_input}.g.fits'
+
+
+    try:
+        import subprocess
+
+        # Define file locations in VOSpace
+        vospace_u = f'vos:cfis/tiles_DR5/{file_u}'
+        vospace_r = f'vos:cfis/tiles_DR5/{file_r}'
+        vospace_g = f'vos:cfis/whigs/stack_images_CFIS_scheme/{file_g_whigs}'
         
-        file_u = 'CFIS.{}.{}.u.fits'.format(xxx_input,yyy_input)
-        file_r = 'CFIS.{}.{}.r.fits'.format(xxx_input,yyy_input)
-        file_g = 'calexp-CFIS_{}_{}.fits'.format(xxx_input,yyy_input)
+        # Download commands
+        subprocess.run(['vcp', vospace_u, folder], check=True, capture_output=True)
+        subprocess.run(['vcp', vospace_r, folder], check=True, capture_output=True)
+        subprocess.run(['vcp', vospace_g, folder], check=True, capture_output=True)
+        
+        logging.info(f'Downloaded {file_u}, {file_r}, and {file_g_whigs}')
 
-        try:
-            # Downloading files
-            dw_u = 'vcp vos:cfis/tiles_DR5/{} {}'.format(file_u, folder)
-            dw_r = 'vcp vos:cfis/tiles_DR5/{} {}'.format(file_r, folder)            
-            dw_g = 'vcp vos:cfis/whigs/stack_images_CFIS_scheme/{} {}'.format(file_g,folder)
+        # Standardize G-band FITS 
+        old_g_path = os.path.join(folder, file_g_whigs)
+        new_g_path = os.path.join(folder, file_g_final)
+        r_path = os.path.join(folder, file_r) # Path to r-band file for header template
+        
+        with fits.open(old_g_path) as hdg, fits.open(r_path) as hdr_template:
+            # Copy data from HDU 1 of the WHIGS file to a standard FITS structure
+            hdr_template[0].data = hdg[1].data
+            hdr_template[0].header['FILTER'] = 'G'
+            hdr_template[0].header['GAIN'] = CONFIG.SEX_GAIN # Use CONFIG value
+            hdr_template.writeto(new_g_path, overwrite=True)
+        
+        os.remove(old_g_path) # Clean up original WHIGS file
+        logging.info(f"Standardized G-band file to {file_g_final}")
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f'VOSpace command failed: {e.cmd}. Output: {e.stdout.decode()} {e.stderr.decode()}')
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+            logging.info(f'Deleted incomplete folder: {folder}')
+        raise
+    
+    except Exception as e:
+        logging.error(f'An unexpected error occurred during download/standardization: {e}')
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+            logging.info(f'Deleted incomplete folder: {folder}')
+        raise
+
+
+def process_and_detect(folder, gal_id, ra_sky, dec_sky, distance_mpc):
+    """
+    Performs galaxy light subtraction and runs source detection (using SExtractor).
+
+    Parameters
+    ----------
+    folder : str
+        Directory containing the FITS files.
+    gal_id : int
+        PGC ID of the galaxy.
+    ra_sky : float
+        Galaxy RA (deg).
+    dec_sky : float
+        Galaxy DEC (deg).
+    distance_mpc : float
+        Distance to the galaxy (Mpc).
+    """
+    logging.info(f"Starting detection phase for PGC {gal_id}")
+    
+    # Prepare environment for SExtractor
+    # NOTE: This assumes SExtractor support files exist in CONFIG.SEX_CONFIG_DIR
+    try:
+        import subprocess
+        # Copy SExtractor CONFIGuration files to the data folder
+        sex_files = [CONFIG.SEX_CONFIG_FILE, CONFIG.SEX_PARAM_FILE, CONFIG.SEX_FILTER_NAME]
+        for f in sex_files:
+            shutil.copy(os.path.join(CONFIG.SEX_CONFIG_DIR, f), folder)
             
-            os.system(dw_u)
-            os.system(dw_r)
-            os.system(dw_g)
-            
-            new_g = '{}/CFIS.{}.{}.g.fits'.format(folder,xxx_input,yyy_input)
-            old_g = '{}/{}'.format(folder,file_g)
-            r_img = '{}/{}'.format(folder,file_r)
-            
-            hdg = fits.open(old_g)
-            hdr = fits.open(r_img)
-            
-            hdr[0].data = hdg[1].data
-            hdr[0].header['FILTER'] = 'G'
-            hdr[0].header['GAIN'] = 1
+        os.chdir(folder)
+    except FileNotFoundError:
+        logging.error(f"Could not find required SExtractor CONFIGuration files in {CONFIG.SEX_CONFIG_DIR}.")
+        os.chdir('..')
+        return # Cannot continue detection without CONFIG files
+    except Exception as e:
+        logging.error(f"Error setting up SExtractor environment: {e}")
+        os.chdir('..')
+        return
 
-            hdr.writeto(new_g,overwrite=True)
-            
-            hdr.close()
-            hdg.close()
-            
-            # Check if both files exist
-            if os.path.exists(os.path.join(folder, file_u)) and os.path.exists(os.path.join(folder, file_r)):
-                print('Downloaded')
-                logging.info(f'Downloaded {file_u,file_r}')
-            else:
-                raise FileNotFoundError("One or both files not found.")
-
-        except Exception as e:
-            print(f'Failed download: {e}')
-
-            # If files don't exist, remove the entire folder
-            if not (os.path.exists(os.path.join(folder, file_u)) and os.path.exists(os.path.join(folder, file_r))):
-                try:
-                    shutil.rmtree(folder)
-                    print(f'The folder {folder} and its contents have been deleted.')
-                    logging.info(f'The folder {folder} and its contents have been deleted.')
-                except Exception as e:
-                    print(f'Error deleting folder: {e}')
-
-
-
-def detect(folder,ra_sky,dec_sky,gal,dist):
-    gal = gal
-    d = dist
-    rad = np.arcsin((100*np.power(10,3))/(d*np.power(10,6)))*206265
-    rad = rad/3600/2
-
-    # detects in the r' filter
     pattern = r"CFIS\.(\d+)\.(\d+)\.([urgiz]).fits"
-    files = os.listdir(folder)
-    fits_files = [file for file in files if file.endswith('.fits') and file.startswith('CFIS')]
-    os.chdir(folder)
+    fits_files = sorted([f for f in os.listdir('.') if f.endswith('.fits') and f.startswith('CFIS')])
+
+    # 1. Image Processing (Light Subtraction)
+    processed_images = {}
     for fits_file in fits_files:
-        file_path = os.path.join(fits_file)
+        match = re.match(pattern, fits_file)
+        if not match:
+            continue
+        xxx, yyy, flt = match.groups()
+        
+        final_image_name = f'{flt}_fin_{xxx}.{yyy}.fits'
+        processed_images[flt] = final_image_name
 
-        match = re.match(pattern,fits_file)
-        xxx = int(match.group(1))
-        yyy = int(match.group(2))
-        xxx = '{:03d}'.format(xxx)
-        yyy = '{:03d}'.format(yyy)
-        if 'r' in fits_file:
-            rfile = fits_file
-            with fits.open(file_path) as hdul:
-                flt = str(hdul[0].header['FILTER'])
-                gain = str(hdul[0].header['GAIN'])
-                seeing = str(hdul[0].header['IQFINAL'])
-                zp = str(30)
-                pxsc = str(0.187)
-                
-                # first we run it over the entire tile
-                
-                w = WCS(hdul[0].header)
-                fname = 'gauss_4.0_7x7.conv'
-                cat1full = '{}_{}.{}.{}.cat'.format(flt[0],gal,xxx,yyy)
-
-                os.system('cp ../unions_gcs/default* .')
-                os.system('cp ../unions_gcs/gauss* .')
-                os.system('cp ../unions_gcs/unions* .')
-                
-                
-                
-
-                hlf1 = hdul[0].data[0:5000]
-                hlf2 = hdul[0].data[5000:10000]
-                
-                final_image = '{}_fin_{}.{}.fits'.format(flt[0],xxx,yyy)
-
-                if final_image not in files:
-                    filtereda = median_filter(hlf1,size=(50))
-                    restaa = hlf1 - filtereda
-                    filtered2a = median_filter(restaa,size=(8))
-                    rest2a = restaa - filtered2a
-                    filteredb = median_filter(hlf2,size=(50))
-                    restab = hlf2 - filteredb
-                    filtered2b = median_filter(restab,size=(8))
-                    rest2b = restab - filtered2b
-                    hdul[0].header['PGC'] = gal
-                    hdul[0].data = np.concatenate((rest2a,rest2b),axis=0)
-                    hdul.writeto(final_image)
-                
-                pt1 = 'sex '+final_image+' -CATALOG_NAME '+cat1full+' -SEEING_FWHM '+seeing+' -DETECT_THRESH 1.2 -FILTER_NAME '+fname
-                pt2 = ' -MAG_ZEROPOINT '+zp+' -GAIN '+gain+' -PIXEL_SCALE '+pxsc+' -PHOT_APERTURES 9 '
-                sx = pt1+pt2
-                logging.info(sx)
-                os.system(sx)
-
-
-                
-    for fits_file in fits_files:
-        ufile = fits_file
-        file_path = os.path.join(fits_file)
+        if os.path.exists(final_image_name):
+            logging.info(f"Processed image {final_image_name} already exists. Skipping filtering.")
+            continue
+        
         try:
-            with fits.open(file_path) as hdul:
-                try:
-                    flt = str(hdul[0].header['FILTER'])
-                    gain = str(hdul[0].header['GAIN'])
-                    print(flt)
-                    zp = str(30)
-                    pxsc = str(0.187)
-                except:
-                    flt = str(hdul[1].header['HIERARCH FPA.FILTERID'])
-                    gain = str(hdul[1].header['HIERARCH CELL.GAIN'])
-                    seeing = str(2)
-                    zp = str(30)
-                    pxsc = str(0.258)
-                    
-                # first we run it over the entire tile
+            with fits.open(fits_file) as hdul:
+                data = hdul[0].data
                 
-                w = WCS(hdul[0].header)
-                fname = 'gauss_4.0_7x7.conv'
-                cat2full = '{}_{}.{}.{}.cat'.format(flt[0],gal,xxx,yyy)
-
-
-                hlf1 = hdul[0].data[0:5000]
-                hlf2 = hdul[0].data[5000:10000]
+                # --- Light Subtraction using CONFIG parameters ---
+                filtered_large = median_filter(data, size=CONFIG.FILTER_LARGE_SCALE)
+                residual_large = data - filtered_large
                 
-                final_image2 = '{}_fin_{}.{}.fits'.format(flt[0],xxx,yyy)
-
-                if final_image not in files:
-                    filtereda = median_filter(hlf1,size=(50))
-                    restaa = hlf1 - filtereda
-                    filtered2a = median_filter(restaa,size=(8))
-                    rest2a = restaa - filtered2a
-                    filteredb = median_filter(hlf2,size=(50))
-                    restab = hlf2 - filteredb
-                    filtered2b = median_filter(restab,size=(8))
-                    rest2b = restab - filtered2b
-                    hdul[0].header['PGC'] = gal
-                    hdul[0].data = np.concatenate((rest2a,rest2b),axis=0)
-                    hdul.writeto(final_image2)
+                filtered_small = median_filter(residual_large, size=CONFIG.FILTER_SMALL_SCALE)
+                final_residual = residual_large - filtered_small
                 
-#                 pt1 = 'sex '+final_image+' -CATALOG_NAME '+cat2full+' -SEEING_FWHM '+seeing+' -DETECT_THRESH 1.2 -FILTER_NAME '+fname
-#                 pt2 = ' -MAG_ZEROPOINT '+zp+' -GAIN '+gain+' -PIXEL_SCALE '+pxsc+' -PHOT_APERTURES 9 '
-#                 sx = pt1+pt2
-#                 logging.info(sx)
-#                 os.system(sx)
-            
+                # Write the processed FITS file
+                hdul[0].data = final_residual
+                hdul[0].header['PGC'] = gal_id
+                hdul[0].header['LIGHTSUB'] = f'MEDIAN_{CONFIG.FILTER_LARGE_SCALE[0]}_{CONFIG.FILTER_SMALL_SCALE[0]}'
+                hdul[0].header['DISTANCE'] = distance_mpc
+                hdul.writeto(final_image_name, overwrite=True)
+                logging.info(f"Generated filtered image: {final_image_name}")
+                
         except Exception as e:
-            print('These are not the files you are looking for')
+            logging.error(f"Error processing image {fits_file}: {e}")
+            continue
 
+    # 2. Source Detection (SExtractor)
+    r_img = processed_images.get('r')
+    u_img = processed_images.get('u')
+    g_img = processed_images.get('g')
+    
+    if not (r_img and u_img and g_img):
+        logging.error("Missing one or more processed FITS files (r, u, g). Cannot run SExtractor.")
+        os.chdir('..')
+        return
 
-        match = re.match(pattern,fits_file)
-        xxx = int(match.group(1))
-        yyy = int(match.group(2))
-        yyy = '{:03d}'.format(yyy)
-        final_image = 'r_fin_{}.{}.fits'.format(flt[0],xxx,yyy)
-        r_image = 'R_fin_{}.{}.{}-{}.fits'.format(xxx,yyy,ra_sky,dec_sky)
+    cat_name = f'full_catalog_{gal_id}_{ra_sky:.4f}_{dec_sky:.4f}.cat'
+    
+    detection_img = r_img
+    
+    # Pass all filtered images for simultaneous measurement
+    measurement_imgs = f'{r_img},{u_img},{g_img}' 
+    
+    sex_command = [
+        'sex', detection_img, '-CATALOG_NAME', cat_name, 
+        '-CATALOG_TYPE', 'ASCII_HEAD',
+        '-MAG_ZEROPOINT', str(CONFIG.DEFAULT_MAG_ZEROPOINT),
+        '-GAIN', str(CONFIG.SEX_GAIN), 
+        '-PIXEL_SCALE', str(CONFIG.PIXEL_SCALE_CFIS),
+        '-SEEING_FWHM', str(CONFIG.DEFAULT_SEEING_FWHM),
+        '-DETECT_THRESH', str(CONFIG.SEX_DETECT_THRESH),
+        '-FILTER_NAME', CONFIG.SEX_FILTER_NAME,
+        '-CHECKIMAGE_TYPE', 'SEGMENTATION', 
+        '-C', CONFIG.SEX_CONFIG_FILE,
+        '-PARAMETERS_NAME', CONFIG.SEX_PARAM_FILE,
+        '-PHOT_APERTURES', str(CONFIG.SEX_APERTURE_SIZE),
+        '-MEASURE_TYPE', 'BOTH',
+        '-WEIGHT_TYPE', 'NONE',
+        '-FLAG_IMAGE', 'NONE',
+        '-BACK_TYPE', 'MANUAL',
+        '-BACK_VALUE', '0.0', # Background already subtracted
+        '-FITS_IMAGES', measurement_imgs # Specify all images for measurement
+    ]
+
+    try:
+        subprocess.run(sex_command, check=True, capture_output=True)
+        logging.info(f'Successfully ran SExtractor. Catalog created: {cat_name}')
+    except subprocess.CalledProcessError as e:
+        logging.error(f"SExtractor failed: {e.cmd}. Error:\n{e.stderr.decode()}")
         
+    os.chdir('..') # Return to the original directory
 
-        if os.path.exists(cat2full):
-            print('Already run')
-        else:
-            pt1 = 'sex '+final_image+','+final_image2+' -CATALOG_NAME '+cat2full+' -SEEING_FWHM '+seeing+' -DETECT_THRESH 1.2 -FILTER_NAME '+fname
-            pt2 = ' -MAG_ZEROPOINT '+zp+' -GAIN '+gain+' -PIXEL_SCALE '+pxsc+' -PHOT_APERTURES 9 '
-            sx = pt1+pt2
-            print(sx)
-            logging.info(sx)
-            os.system(sx)
+def filter_globular_clusters(catalog_path, x_center_pix, y_center_pix, gal_id, distance_mpc):
+    """
+    Applies photometric and morphological cuts to select globular cluster candidates.
+    
+    Parameters
+    ----------
+    catalog_path : str
+        Path to the source extracted catalog (CSV/TXT).
+    x_center_pix, y_center_pix : float
+        Pixel coordinates of the galaxy center.
+    gal_id : int
+        PGC ID for logging.
+    distance_mpc : float
+        Galaxy distance for calculating physical size limits.
 
- 
-            
+    Returns
+    -------
+    pd.DataFrame
+        Filtered DataFrame of GC candidates.
+    """
+    logging.info(f"Starting GC candidate filtering for PGC {gal_id}")
     
-
-    # print('----------------- DONE RUNNING SOURCE EXTRACTOR ---------------')
-    # print(ucen,gcen,ufull,gfull)
-    logging.info('-------------------- DONE EXTRACTING SOURCES -------------')            
-    # Define column names based on the letter so we can match
-    # print(cat1cen,cat2cen)
-#     columns = ['FLUXr', 'FLUXr_e', 'r', 'r_err', 'X', 'Y', 'RA_r', 'DEC_r', 'CLASS_r']
-#     table1 = pd.read_csv(cat1cen, delim_whitespace=True, comment='#', names=columns)
+    # Define columns based on the default SExtractor output (needs to match your .param file)
+    columns = ['NUMBER', 'X_IMAGE', 'Y_IMAGE', 'ALPHA_J2000', 'DELTA_J2000', 
+               'MAG_R', 'MAGERR_R', 'MAG_U', 'MAGERR_U', 'MAG_G', 'MAGERR_G', 
+               'CLASS_STAR']
     
-    # ucen = 'U_cen.{}.{}.{}-{}.cat'.format(xxx,yyy,ra_sky,dec_sky)
-#     ufull = 'U_full.{}.{}.{}-{}.cat'.format(xxx,yyy,ra_sky,dec_sky)
-#     columns = ['FLUXu', 'FLUXu_e', 'u', 'u_err', 'Xu', 'Yu', 'RA_u', 'DEC_u', 'CLASS_u']
-#     # table2 = pd.read_csv(ucen, delim_whitespace=True, comment='#', names=columns)
-    
-#     # gcen = 'G_cen.{}.{}.{}-{}.cat'.format(xxx,yyy,ra_sky,dec_sky)
-#     gfull = 'G_full.{}.{}.{}-{}.cat'.format(xxx,yyy,ra_sky,dec_sky)    
-    
-#     columns = ['FLUXg', 'FLUXg_e', 'g', 'g_err', 'Xg', 'Yg', 'RA_g', 'DEC_g', 'CLASS_g']
-#     # table3 = pd.read_csv(gcen, delim_whitespace=True, comment='#', names=columns)
-#     table3['g'] = table3['g'] - 2.7
-#     total = pd.concat((table1,table2,table3),axis=1)
-#     # print(total)
-    
-#     # Print the stacked table
-#     if total is not None:
-#         print(total)
-#     cat_nm = 'central-{}-{}.cat'.format(ra_sky,dec_sky)
-#     total.to_csv(cat_nm)  
-    
-    # print(cat1full,cat2full)
-
-    columns = ['FLUXr', 'FLUXr_e', 'r', 'r_err', 'X', 'Y', 'RA_r', 'DEC_r', 'CLASS_r']
-    table1 = pd.read_csv(cat1full, delim_whitespace=True, comment='#', names=columns)
-    
-    
-    columns = ['FLUXu', 'FLUXu_e', 'u', 'u_err', 'X', 'Y', 'RA_u', 'DEC_u', 'CLASS_u']
-    table2 = pd.read_csv(ufull, delim_whitespace=True, comment='#', names=columns)
-    
-    columns = ['FLUXg', 'FLUXg_e', 'g', 'g_err', 'Xg', 'Yg', 'RA_g', 'DEC_g', 'CLASS_g']
-    table3 = pd.read_csv(gfull, delim_whitespace=True, comment='#', names=columns)
-    
-
-    total = pd.concat((table1,table2,table3),axis=1)    
-    
-    g_img = '{}/G_fin_{}.{}.{}-{}'.format(folder,xxx_input,yyy_input,coords_ra,coords_dec)
-    u_img = '{}/U_fin_{}.{}.{}-{}'.format(folder,xxx_input,yyy_input,coords_ra,coords_dec)
-    r_img = '{}/R_fin_{}.{}.{}-{}'.format(folder,xxx_input,yyy_input,coords_ra,coords_dec)
-    
-#     dp = 'dolphot dphot -punions.param img0_file={} img1_file={} img2_file={} img3_file={}'.format(r_img,r_img,g_img,u_img)
-#     os.system(dp)
-    # print(dp)
-    
-    # Print the stacked table
-    if total is not None:
-        print(total)
-    cat_nm = 'total-{}-{}.cat'.format(ra_sky,dec_sky)
-    total.to_csv(cat_nm)  
-    n = len(total)
-
-    print('----------------- DONE MATCHING ---------------')
-    logging.info('-------------------- DONE MATCHING -------------')            
-    
-    if total.empty:
-        shutil.rmtree(folder)
-        print('-------------- DELETING FOLDER SINCE THERE ARE NO OBJECTS --------------')
-    logging.info(f'Galaxy {gal} at {ra_sky,ra_dec} has {n} objects')
-
-
-    
-def plotting(folder,xxx_input,yyy_input,coords_ra,coords_dec,dist):
-    
-    d = dist
-    xxx_input = xxx_input
-    yyy_input = yyy_input
+    try:
+        cat = pd.read_csv(catalog_path, delim_whitespace=True, comment='#', names=columns)
         
+    except Exception as e:
+        logging.error(f"Failed to read catalog at {catalog_path}: {e}")
+        return pd.DataFrame()
 
-    img_og = '{}/CFIS.{}.{}.r.fits'.format(folder,xxx_input,yyy_input)
-    img_crop = '{}/R_crop_{}.{}.{}-{}.fits'.format(folder,xxx_input,yyy_input,coords_ra,coords_dec)
-    img_fin = '{}/R_fin_{}.{}.{}-{}.fits'.format(folder,xxx_input,yyy_input,coords_ra,coords_dec)
+    # Calculate distance from the galaxy center in pixels
+    cat['RAD_PIX'] = np.sqrt(
+        np.power(cat['X_IMAGE'] - x_center_pix, 2) + 
+        np.power(cat['Y_IMAGE'] - y_center_pix, 2)
+    )
     
-    hdu2 = fits.open(img_fin)
-    og = fits.open(img_og)
-    w = WCS(og[0].header)
-    og.close()
+    # Calculate colors
+    cat['u_r'] = cat['MAG_U'] - cat['MAG_R']
+    cat['g_r'] = cat['MAG_G'] - cat['MAG_R']
+
+ # --- Core GC Selection Cuts using CONFIG parameters ---
     
-    (xcen), (ycen) = w.all_world2pix([coords_ra], [coords_dec], 0)
-
-    gal_ra,gal_dec = (float(coords_ra),float(coords_dec))
-    rad = np.arcsin((60*np.power(10,3))/(d*np.power(10,6)))*206265
-    rad = rad/3600/2
-    dec_ll, ra_ll = gal_dec-rad, gal_ra+rad
-    dec_ur, ra_ur = gal_dec+rad, gal_ra-rad
-
-    (xmin, xmax), (ymin, ymax) = w.all_world2pix([ra_ll, ra_ur], [dec_ll, dec_ur], 0)
+    # 1. Morphological Cut (Stellarity index)
+    cat_filtered = cat[cat['CLASS_STAR'] > CONFIG.GC_CLASS_STAR_THRESHOLD]
     
-    cat_nm = '{}/total-{}-{}.cat'.format(folder,coords_ra,coords_dec)
-    cat = pd.read_csv(cat_nm)
-
-
-    cat['rad'] = np.sqrt(np.power((cat['X']-xcen),2)+np.power((cat['Y']-ycen),2))
-    cat['g'] = cat['g'] - 2.7
-    cat = cat[(cat['CLASS_r']>0.8)&(cat['u']<30)&(cat['r']<30)&(cat['r_err']<0.1)&(cat['g_err']<0.5)&(cat['rad']<4000)]
+    # 2. Photometric Cuts 
+    cat_filtered = cat_filtered[
+        (cat_filtered['U_R'] > CONFIG.GC_U_R_MIN) & (cat_filtered['U_R'] < CONFIG.GC_U_R_MAX) &
+        (cat_filtered['G_R'] > CONFIG.GC_G_R_MIN) & (cat_filtered['G_R'] < CONFIG.GC_G_R_MAX)
+    ]
     
-    hdu = fits.open(img_crop)
-
-    PGC = int(hdu[0].header['PGC'])
-    file_nm = '../plots/galaxy_{}.png'.format(PGC)
-    dcm_nm = '../plots/dcm_{}.png'.format(PGC)
-    print(file_nm,dcm_nm)
-
+    # 3. Quality Cuts
+    cat_filtered = cat_filtered[
+        (cat_filtered['MAGERR_R'] < CONFIG.GC_MAG_ERR_MAX) & 
+        (cat_filtered['MAG_R'] < CONFIG.GC_MAG_R_MAX) & (cat_filtered['MAG_R'] > CONFIG.GC_MAG_R_MIN)
+    ]
     
-#     fig = plt.figure(figsize=(15,10))
-#     w = WCS(hdu[0].header)
-#     ax1 = fig.add_subplot(121, projection=w)
-#     tr_fk5 = ax1.get_transform("fk5")
-#     plt.title(PGC)
-#     plt.scatter(cat['RA_r'],cat['DEC_r'],s=10,transform=tr_fk5,c=cat['CLASS_r'],cmap='Oranges')
-#     plt.xlabel('RA')
-#     plt.ylabel('DEC')
-#     plt.xlim(xmin,xmax)
-#     plt.ylim(ymin,ymax)
-#     ax2 = fig.add_subplot(122, projection=w)
-#     tr_fk5 = ax2.get_transform("fk5")
-
-#     plt.imshow(hdu[0].data,vmax=10,vmin=0)
-#     plt.xlabel('RA')
-#     plt.ylabel('DEC')
- 
-#     plt.savefig(file_nm,bbox_inches='tight')
-#     plt.close
-
-    fig,(ax1,ax2) = plt.subplots(1,2,figsize=(8,6))
-    plt.title(PGC)
-    ax1.scatter(cat['u']-cat['r'],cat['g']-cat['r'],s=5,c='orange')
-    ax1.set_xlabel('u-r')
-    ax1.set_ylabel('g-r')
-    ax1.set_ylim(-1,6)
-    ax1.set_xlim(-1,6)
-    ax2.scatter(cat['r'],cat['CLASS_r'],s=5,c='orange')
-    ax2.set_xlabel('R')
-    ax2.set_ylabel('CLASS_STAR')
-    plt.savefig(dcm_nm,bbox_inches='tight')
-    plt.close() 
+    # 4. Radial Cut (in pixels)
+    kpc_to_arcsec = (1 / (distance_mpc * 1e6)) * 206265 # arcsec per 1 pc
+    radius_kpc_arcsec = CONFIG.GC_RADIAL_DISTANCE_KPC * 1000 * kpc_to_arcsec
+    radius_kpc_pix = radius_kpc_arcsec / CONFIG.PIXEL_SCALE_CFIS
     
-
-
-    flum = '../plots/analysis_{}.png'.format(PGC)
-    print(flum)
-
-#     fig, (ax1,ax2,ax3) = plt.subplots(3,1,figsize=(19,6))
-#     sel = cat[(cat['r_err']<0.5)&((cat['u']-cat['r'])>0)&((cat['u']-cat['r'])<3)&((cat['g']-cat['r'])<1)&((cat['g']-cat['r'])>0.5)]
-
-#     ax1.hist(sel['r'],bins=50,ec='orange',fc='None',linewidth=3)
-#     ax1.set_xlabel('R')
-#     ax1.set_ylabel('N')
-#     ax1.set_xlim(20,25)
-#     rad_sec = sel['rad'] * 0.185
+    cat_filtered = cat_filtered[cat_filtered['RAD_PIX'] < radius_kpc_pix]
     
-#     ax2.hist(rad_sec,bins=30,ec='orange',fc='None',linewidth=3)
-#     ax2.set_xlabel('rad [arcsec]')
-#     ax2.set_ylabel('N')
+    logging.info(f"Total objects detected: {len(cat)}. GC candidates found: {len(cat_filtered)}")
     
-#     cat_nm2 = '{}/central-{}-{}.cat'.format(folder,coords_ra,coords_dec)
-#     cat2 = pd.read_csv(cat_nm2)
-#     ycen2 = len(hdu[0].data)/2
-#     xcen2 = len(hdu[0].data[0])/2
-#     cat2['rad'] = np.sqrt(np.power((cat2['X']-xcen2),2)+np.power((cat2['Y']-ycen2),2))
-#     cat2 = cat2[(cat2['CLASS_r']>0.5)&(cat2['u']<30)&(cat2['r']<30)]
-#     sel2 = cat2[((cat2['u']-cat2['r'])>0)&((cat2['u']-cat2['r'])<4)]
-    
-
-#     sel2 = cat2[((cat2['u']-cat2['r'])>0)&((cat2['u']-cat2['r'])<4)]
-#     rad_sec2 = sel2['rad'] * 0.185
-#     ax3.hist(rad_sec2,bins=15,ec='orange',fc='None',linewidth=3)
-#     ax3.set_xlabel('rad [arcsec]')
-#     ax3.set_ylabel('N')
+    return cat_filtered
 
 
-    fig, ax = plt.subplots(figsize=(10,3))
-    sel = cat[(cat['r_err']<0.1)&((cat['u']-cat['r'])>0)&((cat['u']-cat['r'])<3)&((cat['g']-cat['r'])<1)&((cat['g']-cat['r'])>0.5)]
-    # loctx = np.max(np.log(np.histogram(sel['r'],bins=18)[0]))
-    ax.hist(sel['r'],bins=18,ec='orange',fc='None',linewidth=3)
-    ax.set_xlabel('r')
-    ax.set_ylabel('N')
-    ax.set_xlim(18,24.7)
-    ax.set_yscale('log')
-    ng = 'PGC {}'.format(PGC)
-    # ax.text(18.5,loctx,ng,fontsize=20)
-#     rad_sec = sel['rad'] * 0.185
-    
-#     ax2.hist(rad_sec,bins=30,ec='orange',fc='None',linewidth=3)
-#     ax2.set_xlabel('rad [arcsec]')
-#     ax2.set_ylabel('N')
-    
-#     cat_nm2 = '{}/central-{}-{}.cat'.format(folder,coords_ra,coords_dec)
-#     cat2 = pd.read_csv(cat_nm2)
-#     ycen2 = len(hdu[0].data)/2
-#     xcen2 = len(hdu[0].data[0])/2
-#     cat2['rad'] = np.sqrt(np.power((cat2['X']-xcen2),2)+np.power((cat2['Y']-ycen2),2))
-#     cat2 = cat2[(cat2['CLASS_r']>0.5)&(cat2['u']<30)&(cat2['r']<30)]
-#     sel2 = cat2[((cat2['u']-cat2['r'])>0)&((cat2['u']-cat2['r'])<4)]
-    
 
-#     sel2 = cat2[((cat2['u']-cat2['r'])>0)&((cat2['u']-cat2['r'])<4)]
-#     rad_sec2 = sel2['rad'] * 0.185
-#     ax3.hist(rad_sec2,bins=15,ec='orange',fc='None',linewidth=3)
-#     ax3.set_xlabel('rad [arcsec]')
-#     ax3.set_ylabel('N')
 
     
-    plt.savefig(flum,bbox_inches='tight')
-    plt.close()
-        
+def generate_plots(folder, gal_id, ra_sky, dec_sky, distance_mpc, final_catalog):
+    """
+    Generates key plots for the analysis: Color-Magnitude Diagram and radial distribution.
+    
+    Parameters
+    ----------
+    folder : str
+        Directory containing the data.
+    gal_id : int
+        PGC ID.
+    ra_sky, dec_sky : float
+        Galaxy coordinates.
+    distance_mpc : float
+        Galaxy distance.
+    final_catalog : pd.DataFrame
+        The filtered DataFrame of GC candidates.
+    """
+    
+    if final_catalog.empty:
+        logging.warning(f"No GC candidates to plot for PGC {gal_id}.")
+        return
+
+    plot_dir = 'plots'
+    
+    # --- Plot 1: Color-Magnitude Diagram (CMD) ---
+    fig_cmd, ax_cmd = plt.subplots(figsize=(7, 6))
+    ax_cmd.scatter(final_catalog['U_R'], final_catalog['G_R'], s=15, c='darkorange', alpha=0.7)
+    
+    # Annotate the expected GC region boundaries from config
+    ax_cmd.axvline(x=config.GC_U_R_MIN, color='blue', linestyle=':', alpha=0.5)
+    ax_cmd.axvline(x=config.GC_U_R_MAX, color='blue', linestyle=':', alpha=0.5)
+    ax_cmd.axhline(y=config.GC_G_R_MIN, color='red', linestyle=':', alpha=0.5)
+    ax_cmd.axhline(y=config.GC_G_R_MAX, color='red', linestyle=':', alpha=0.5)
 
 
+    ax_cmd.set_xlabel('u - r (mag)', fontsize=12)
+    ax_cmd.set_ylabel('g - r (mag)', fontsize=12)
+    ax_cmd.set_title(f'PGC {gal_id} CMD (GC Candidates)', fontsize=14)
+    ax_cmd.grid(True, linestyle=':', alpha=0.6)
+    fig_cmd.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f'cmd_pgc{gal_id}.png'), dpi=150)
+    plt.close(fig_cmd)
+    logging.info(f"Generated CMD plot for PGC {gal_id}.")
 
-def mag_aper(folder,file):
-    os.chdir(folder)
-    data = pd.read_csv(file)
-
-    # Order the DataFrame based on the "MAG" column
-    ordered_data = data.sort_values(by='MAG_r')
-
-    # Create a new table with the first 50 lines
-    processed_table = Table.from_pandas(ordered_data.head(50))
-
-    x_values = processed_table['x'].data
-    y_values = processed_table['y'].data
+    # --- Plot 2: Radial Distribution ---
+    fig_rad, ax_rad = plt.subplots(figsize=(7, 6))
+    
+    # Convert radial distance from pixels to arcsec
+    final_catalog['RAD_ARCSEC'] = final_catalog['RAD_PIX'] * config.PIXEL_SCALE_CFIS
+    
+    # Bin the radial distances
+    ax_rad.hist(final_catalog['RAD_ARCSEC'], bins=20, histtype='step', 
+                color='navy', linewidth=2, label=f'N={len(final_catalog)}')
+    
+    ax_rad.set_xlabel('Projected Radial Distance (arcsec)', fontsize=12)
+    ax_rad.set_ylabel('Number of GCs', fontsize=12)
+    ax_rad.set_title(f'PGC {gal_id} Radial Distribution', fontsize=14)
+    ax_rad.legend()
+    ax_rad.set_yscale('log')
+    fig_rad.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f'radial_pgc{gal_id}.png'), dpi=150)
+    plt.close(fig_rad)
+    logging.info(f"Generated radial distribution plot for PGC {gal_id}.")
 
  
 
-if __name__ == "__main__":
-#    parser = argparse.ArgumentParser(description="Execute specified functions.")
-    cat = input('Enter galaxy catalogue\n')
-    test = np.loadtxt(cat)
+def main():
+    """
+    Main function to parse arguments and execute the pipeline stages.
+    """
+    parser = argparse.ArgumentParser(
+        description="Globular Cluster Candidate Search Pipeline. Requires VOSpace client (vcp) and SExtractor (sex) installed."
+    )
+    parser.add_argument(
+        '--catalogue', 
+        type=str, 
+        required=True,
+        help="Path to the input catalogue file. Must contain columns: RA (deg), Dec (deg), PGC_ID (int), Distance (Mpc)."
+    )
+    parser.add_argument(
+        '--skip-download', 
+        action='store_true',
+        help="Skip the download step (use if files are already present locally)."
+    )
+    parser.add_argument(
+        '--skip-detect', 
+        action='store_true',
+        help="Skip the detection and light subtraction step (use if catalogs are already generated)."
+    )
+    
+    args = parser.parse_args()
+    
+    print(f"--- Starting Globular Cluster Pipeline (Logging to {config.LOG_FILENAME}) ---")
+    
     start_time = time.time()
-    result = subprocess.check_output(['wc', '-l', cat]).decode('utf-8')
-    num_lines = int(result.split()[0])
-    with open('output.txt', 'w') as file:
-        for i in range(int(num_lines)):
 
-            coords_ra = test[i][0]
-            coords_dec = test[i][1]
-            gal = test[i][2]
-            check = in_UNIONS(coords_ra,coords_dec,listing='UNIONS_CFIS_LSB_r_DR5.txt')
+    # Load the catalogue data
+    try:
+        data = np.loadtxt(args.catalogue)
+    except FileNotFoundError:
+        logging.critical(f"Input catalogue file not found: {args.catalogue}")
+        print("CRITICAL ERROR: Input catalogue not found.")
+        return
+    except Exception as e:
+        logging.critical(f"Error loading catalogue: {e}")
+        print("CRITICAL ERROR: Failed to load catalogue.")
+        return
 
-            if check[0]==False:
-                check = in_UNIONS(coords_ra,coords_dec,listing='tiles_DR2.list.txt')
+    num_galaxies = len(data)
+    logging.info(f"Loaded {num_galaxies} galaxies from catalogue.")
 
-            xxx_input = int(check[1])
-            yyy_input = int(check[2])
-            dist = test[i][3]
+    for i in range(num_galaxies):
+        coords_ra, coords_dec, gal_id, dist_mpc = data[i]
+        gal_id = int(gal_id)
+        
+        logging.info(f"--- Processing Galaxy {i+1}/{num_galaxies}: PGC {gal_id} at ({coords_ra:.4f}, {coords_dec:.4f}) ---")
+        
+        # 1. Check Tile Coverage
+        is_in_tile = False
+        xxx_input_int, yyy_input_int = 0, 0
+        try:
+            # Iterate through the configured tile listing files
+            for listing_file in config.TILE_LISTINGS:
+                is_in_tile, xxx_input_int, yyy_input_int = in_unions(coords_ra, coords_dec, listing_file)
+                if is_in_tile:
+                    break # Found a tile, stop searching
 
-
-            xxx_input = '{:03d}'.format(xxx_input)
-            yyy_input = '{:03d}'.format(yyy_input)
-
-            if yyy_input==0:
-                yyy_input = '000'
-            folder = '../CFIS.{}.{}'.format(xxx_input,yyy_input)
-#             try:
-#                 download(coords_ra,coords_dec)
-#             except:
-#                 print('contained in',folder) 
-            
-#             try:
-#                 hdul = detect(folder,coords_ra,coords_dec,gal,dist)  
-#                 print('done with',coords_ra,coords_dec,'in folder',folder)
+            if not is_in_tile:
+                logging.info(f"PGC {gal_id} not in any known CFIS tile. Skipping.")
+                continue
                 
-#             except:
-#                 print('could not detect in',coords_ra,coords_dec,'in folder',folder)
+            xxx_input = '{:03d}'.format(xxx_input_int)
+            yyy_input = '{:03d}'.format(yyy_input_int)
 
-#             os.chdir('/arc/home/aennis/scripts/unions_gcs/')
-#             print(folder,xxx_input,yyy_input,coords_ra,coords_dec,dist)
+            if yyy_input_int == 0 and yyy_input != '000':
+                yyy_input = '000'
+                
+            folder = os.path.join(os.getcwd(), f'CFIS.{xxx_input}.{yyy_input}')
+            catalog_path = os.path.join(folder, f'full_catalog_{gal_id}_{coords_ra:.4f}_{coords_dec:.4f}.cat')
+
+        except Exception as e:
+            logging.error(f"Error during tile check for PGC {gal_id}: {e}")
+            continue
+
+        # 2. Download Data
+        if not args.skip_download and not os.path.exists(folder):
             try:
-                plotting(folder,xxx_input,yyy_input,coords_ra,coords_dec,dist)
-                file.write(f'{gal} {coords_ra} {coords_dec} {dist} {xxx_input}{yyy_input}\n')
-            except:
-                print('no')
+                setup_directories(folder)
+                download_data(coords_ra, coords_dec, xxx_input, yyy_input, folder)
+            except Exception as e:
+                logging.error(f"Download failed for PGC {gal_id}. Skipping detection/analysis.")
+                continue
+
+        # 3. Detect Sources and Filter Light
+        if not args.skip_detect and os.path.exists(folder):
+            try:
+                process_and_detect(folder, gal_id, coords_ra, coords_dec, dist_mpc) 
+            except Exception as e:
+                logging.error(f"Detection failed for PGC {gal_id}: {e}. Skipping analysis.")
+                continue
+
+        # 4. Analysis and Plotting
+        if os.path.exists(catalog_path):
+            try:
+                # --- WCS CALCULATION: CRITICAL FIX ---
+                # To find the true center, we need WCS from one of the FITS files.
+                # Assuming 'r' band is available in the folder.
+                r_fits_path = os.path.join(folder, f'r_fin_{xxx_input}.{yyy_input}.fits')
+                if not os.path.exists(r_fits_path):
+                    r_fits_path = os.path.join(folder, f'CFIS.{xxx_input}.{yyy_input}.r.fits')
+
+                if os.path.exists(r_fits_path):
+                    with fits.open(r_fits_path) as hdul:
+                        w = WCS(hdul[0].header)
+                        # Convert galaxy RA/DEC to pixel coordinates
+                        x_center_pix, y_center_pix = w.all_world2pix(coords_ra, coords_dec, 0)
+                else:
+                    logging.warning(f"FITS file not found for WCS, using hardcoded center (5000, 5000).")
+                    x_center_pix, y_center_pix = 5000, 5000 
+                # --- END WCS CALCULATION ---
+                
+                final_catalog = filter_globular_clusters(
+                    catalog_path, 
+                    x_center_pix, 
+                    y_center_pix, 
+                    gal_id, 
+                    dist_mpc
+                )
+                
+                generate_plots(folder, gal_id, coords_ra, coords_dec, dist_mpc, final_catalog)
+                
+            except Exception as e:
+                logging.error(f"Analysis/Plotting failed for PGC {gal_id}: {e}")
+                
+        else:
+             logging.warning(f"Catalog not found for PGC {gal_id}. Cannot run analysis.")
+
 
     end_time = time.time()
     elapsed_time = end_time - start_time
-    print('Elapsed time downloading',elapsed_time)  
+    print(f"\n--- Pipeline finished. Total time: {elapsed_time:.2f} seconds ---")
 
-    
-    
- 
+
+if __name__ == "__main__":
+    if not os.path.exists('plots'):
+        os.makedirs('plots')
+    main()
