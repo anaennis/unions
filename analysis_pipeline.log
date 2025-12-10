@@ -1,0 +1,46 @@
+2025-12-09 17:01:13,290 - INFO: Loaded 2 galaxies from catalogue.
+2025-12-09 17:01:13,290 - INFO: --- Processing Galaxy 1/2: PGC 12345 at (210.8024, 54.3488) ---
+2025-12-09 17:01:13,384 - INFO: Created data folder: /home/anaines/Documents/2025/unions/CFIS.245.289
+2025-12-09 17:01:13,384 - INFO: Attempting download for tile CFIS.245.289
+2025-12-09 17:24:38,066 - INFO: Downloaded CFIS.245.289.u.fits, CFIS.245.289.r.fits, and calexp-CFIS_245_289.fits
+2025-12-09 17:24:40,176 - INFO: Standardized G-band file to CFIS.245.289.g.fits
+2025-12-09 17:24:40,186 - INFO: Starting detection phase for PGC 12345
+2025-12-09 18:04:06,085 - INFO: Generated filtered image: g_fin_245.289.fits
+2025-12-09 18:43:18,753 - INFO: Generated filtered image: r_fin_245.289.fits
+2025-12-09 19:23:23,104 - INFO: Generated filtered image: u_fin_245.289.fits
+2025-12-09 19:23:23,191 - ERROR: DOLPHOT failed: ['dolphot', 'full_catalog_12345_210.8024_54.3488.cat', '-p', 'dolphot.param']. Error:
+
+2025-12-09 19:23:23,269 - WARNING: FITSFixedWarning: 'datfix' made the change 'Set DATE-OBS to '2017-02-24T14:37:52.179' from MJD-OBS'.
+2025-12-09 19:23:23,269 - INFO: Starting GC candidate filtering for PGC 12345
+2025-12-09 19:23:23,279 - ERROR: Analysis/Plotting failed for PGC 12345: 'U_R'
+2025-12-09 19:23:23,279 - INFO: --- Processing Galaxy 2/2: PGC 67890 at (171.1818, 38.7628) ---
+2025-12-09 19:23:23,372 - INFO: Created data folder: /home/anaines/Documents/2025/unions/CFIS.266.258
+2025-12-09 19:23:23,373 - INFO: Attempting download for tile CFIS.266.258
+2025-12-09 19:25:49,860 - ERROR: VOSpace command failed: ['vcp', 'vos:cfis/tiles_DR5/CFIS.266.258.u.fits', '/home/anaines/Documents/2025/unions/CFIS.266.258']. Output:  ERROR:: Read timeout on https://ws-cadc.canfar.net/vault/xfer/hnx9uhrunf806qqq
+
+2025-12-09 19:25:49,861 - INFO: Deleted incomplete folder: /home/anaines/Documents/2025/unions/CFIS.266.258
+2025-12-09 19:25:49,861 - ERROR: Download failed for PGC 67890. Skipping detection/analysis.
+2025-12-10 14:55:38,134 - INFO: Loaded 2 galaxies from catalogue.
+2025-12-10 14:55:38,134 - INFO: --- Processing Galaxy 1/2: PGC 12345 at (210.8024, 54.3488) ---
+2025-12-10 14:55:38,230 - INFO: Created data folder: /home/anaines/Documents/2025/unions/../data/CFIS.245.289
+2025-12-10 14:55:38,230 - INFO: Attempting download for tile CFIS.245.289
+2025-12-10 14:56:36,177 - INFO: Loaded 2 galaxies from catalogue.
+2025-12-10 14:56:36,177 - INFO: --- Processing Galaxy 1/2: PGC 12345 at (210.8024, 54.3488) ---
+2025-12-10 14:56:36,270 - INFO: Starting detection phase for PGC 12345
+2025-12-10 14:56:36,270 - INFO: All processed images already exist. Skipping image processing for PGC 12345.
+2025-12-10 14:56:36,335 - ERROR: DOLPHOT failed: ['dolphot', 'full_catalog_12345_210.8024_54.3488.cat', '-pdolphot.param', 'img1_file=r_fin_245.289.fits', 'img2_file=g_fin_245.289.fits', 'img3_file=u_fin_245.289.fits']. Error:
+
+2025-12-10 14:56:36,349 - WARNING: FITSFixedWarning: 'datfix' made the change 'Set DATE-OBS to '2017-02-24T14:37:52.179' from MJD-OBS'.
+2025-12-10 14:56:36,349 - INFO: Starting GC candidate filtering for PGC 12345
+2025-12-10 14:56:36,354 - ERROR: Analysis/Plotting failed for PGC 12345: 'U_R'
+2025-12-10 14:56:36,354 - INFO: --- Processing Galaxy 2/2: PGC 67890 at (171.1818, 38.7628) ---
+2025-12-10 14:56:36,449 - INFO: Created data folder: /home/anaines/Documents/2025/unions/../data/CFIS.266.258
+2025-12-10 14:56:36,449 - INFO: Attempting download for tile CFIS.266.258
+2025-12-10 14:59:43,912 - INFO: Loaded 2 galaxies from catalogue.
+2025-12-10 14:59:43,912 - INFO: --- Processing Galaxy 1/2: PGC 12345 at (210.8024, 54.3488) ---
+2025-12-10 14:59:44,006 - INFO: Starting detection phase for PGC 12345
+2025-12-10 14:59:44,007 - INFO: All processed images already exist. Skipping image processing for PGC 12345.
+2025-12-10 15:03:21,781 - INFO: Loaded 2 galaxies from catalogue.
+2025-12-10 15:03:21,781 - INFO: --- Processing Galaxy 1/2: PGC 12345 at (210.8024, 54.3488) ---
+2025-12-10 15:03:21,875 - INFO: Starting detection phase for PGC 12345
+2025-12-10 15:03:21,876 - INFO: All processed images already exist. Skipping image processing for PGC 12345.

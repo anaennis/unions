@@ -1,15 +1,12 @@
 # --- FILE PATHS ---
 
-# Local directory where SExtractor support files (unions.sex, default.param, etc.) are located.
-
-SEX_CONFIG_DIR = 'config_files/sextractor/'
+# Directory for data downloads and outputs (relative to script location or absolute)
+DATA_DIR = '../data'
 
 # Tile listing files for coverage check (searched in order)
 
 TILE_LISTINGS = [
-    'UNIONS_CFIS_LSB_r_DR5.txt',
-    'tiles_DR2.list.txt'
-]
+    'UNIONS_CFIS_LSB_r_DR5.txt']
 
 # Logging configuration
 LOG_FILENAME = 'analysis_pipeline.log'
@@ -30,14 +27,24 @@ FILTER_LARGE_SCALE = (50, 50)
 FILTER_SMALL_SCALE = (8, 8)
 
 
-# --- SOURCE DETECTION (SExtractor) PARAMETERS ---
+# --- DETECTION PARAMETERS (DOLPHOT) ---
+# DOLPHOT parameter values (these map to entries in a DOLPHOT parameter file)
+Nimg = 3
+img_RAPER = 6.0
+img_RPSF = 13
+img_APRAD = 10
+# Background aperture(s) usually provided as two integers (inner, outer)
+img_APSKY = (10, 15)
+img_RCentroid = 2
+PSFPhot = 1
+FSat = 0.999
+ZERO = 25.0
 
-SEX_DETECT_THRESH = 1.2 # Detection Threshold
-SEX_FILTER_NAME = 'gauss_4.0_7x7.conv' # Filter
-SEX_APERTURE_SIZE = 9 # Aperture size for photometry 
-SEX_CONFIG_FILE = 'unions.sex' # SExtractor configuration file
-SEX_PARAM_FILE = 'default.param' # Parameter file
-SEX_GAIN = 1.0 # Default Gain (should be read from header, but here for manual config)
+# Default instrumental gain to write into FITS headers when needed
+DEFAULT_GAIN = 1.0
+
+# DOLPHOT parameter file (used when running dolphot)
+DOLPHOT_PARAM_FILE = 'dolphot.param'
 
 
 # --- GLOBULAR CLUSTER (GC) CANDIDATE FILTERING CUTS ---

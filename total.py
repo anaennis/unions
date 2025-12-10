@@ -1,5 +1,8 @@
+#!/usr/bin/env python3
 import argparse
+import subprocess
 import time
+import re
 import numpy as np
 import os
 import shutil
@@ -13,8 +16,8 @@ import matplotlib.pyplot as plt
 # Import the CONFIGuration file
 import CONFIG
 
-# Set up logging CONFIGuration
-logging.basicCONFIG(filename=CONFIG.LOG_FILENAME, level=logging.INFO, 
+# Set up logging configuration
+logging.basicConfig(filename=CONFIG.LOG_FILENAME, level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s: %(message)s')
 
 
@@ -27,7 +30,10 @@ def setup_directories(folder_name):
             os.makedirs(folder_name)
             logging.info(f"Created data folder: {folder_name}")
         
-        plot_dir = 'plots'
+        # Get data directory for plots
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(script_dir, CONFIG.DATA_DIR)
+        plot_dir = os.path.join(data_dir, 'plots')
         if not os.path.exists(plot_dir):
             os.makedirs(plot_dir)
             logging.info(f"Created plots folder: {plot_dir}")
@@ -120,7 +126,7 @@ def download_data(ra, dec, xxx_input, yyy_input, folder):
     """
     logging.info(f"Attempting download for tile CFIS.{xxx_input}.{yyy_input}")
     
-        file_u = f'CFIS.{xxx_input}.{yyy_input}.u.fits'
+    file_u = f'CFIS.{xxx_input}.{yyy_input}.u.fits'
     file_r = f'CFIS.{xxx_input}.{yyy_input}.r.fits'
     file_g_whigs = f'calexp-CFIS_{xxx_input}_{yyy_input}.fits' 
     file_g_final = f'CFIS.{xxx_input}.{yyy_input}.g.fits'
@@ -133,7 +139,6 @@ def download_data(ra, dec, xxx_input, yyy_input, folder):
         vospace_u = f'vos:cfis/tiles_DR5/{file_u}'
         vospace_r = f'vos:cfis/tiles_DR5/{file_r}'
         vospace_g = f'vos:cfis/whigs/stack_images_CFIS_scheme/{file_g_whigs}'
-        
         # Download commands
         subprocess.run(['vcp', vospace_u, folder], check=True, capture_output=True)
         subprocess.run(['vcp', vospace_r, folder], check=True, capture_output=True)
@@ -150,7 +155,7 @@ def download_data(ra, dec, xxx_input, yyy_input, folder):
             # Copy data from HDU 1 of the WHIGS file to a standard FITS structure
             hdr_template[0].data = hdg[1].data
             hdr_template[0].header['FILTER'] = 'G'
-            hdr_template[0].header['GAIN'] = CONFIG.SEX_GAIN # Use CONFIG value
+            hdr_template[0].header['GAIN'] = CONFIG.DEFAULT_GAIN
             hdr_template.writeto(new_g_path, overwrite=True)
         
         os.remove(old_g_path) # Clean up original WHIGS file
@@ -190,111 +195,102 @@ def process_and_detect(folder, gal_id, ra_sky, dec_sky, distance_mpc):
     """
     logging.info(f"Starting detection phase for PGC {gal_id}")
     
-    # Prepare environment for SExtractor
-    # NOTE: This assumes SExtractor support files exist in CONFIG.SEX_CONFIG_DIR
-    try:
-        import subprocess
-        # Copy SExtractor CONFIGuration files to the data folder
-        sex_files = [CONFIG.SEX_CONFIG_FILE, CONFIG.SEX_PARAM_FILE, CONFIG.SEX_FILTER_NAME]
-        for f in sex_files:
-            shutil.copy(os.path.join(CONFIG.SEX_CONFIG_DIR, f), folder)
-            
-        os.chdir(folder)
-    except FileNotFoundError:
-        logging.error(f"Could not find required SExtractor CONFIGuration files in {CONFIG.SEX_CONFIG_DIR}.")
-        os.chdir('..')
-        return # Cannot continue detection without CONFIG files
-    except Exception as e:
-        logging.error(f"Error setting up SExtractor environment: {e}")
-        os.chdir('..')
-        return
+    # Change to the folder containing the FITS files
+    original_dir = os.getcwd()
+    os.chdir(folder)
 
     pattern = r"CFIS\.(\d+)\.(\d+)\.([urgiz]).fits"
     fits_files = sorted([f for f in os.listdir('.') if f.endswith('.fits') and f.startswith('CFIS')])
 
-    # 1. Image Processing (Light Subtraction)
+    # Check if all processed images already exist
+    expected_filters = ['r', 'u', 'g']
     processed_images = {}
+    all_processed = True
+    
     for fits_file in fits_files:
         match = re.match(pattern, fits_file)
         if not match:
             continue
         xxx, yyy, flt = match.groups()
-        
         final_image_name = f'{flt}_fin_{xxx}.{yyy}.fits'
         processed_images[flt] = final_image_name
-
-        if os.path.exists(final_image_name):
-            logging.info(f"Processed image {final_image_name} already exists. Skipping filtering.")
-            continue
         
-        try:
-            with fits.open(fits_file) as hdul:
-                data = hdul[0].data
-                
-                # --- Light Subtraction using CONFIG parameters ---
-                filtered_large = median_filter(data, size=CONFIG.FILTER_LARGE_SCALE)
-                residual_large = data - filtered_large
-                
-                filtered_small = median_filter(residual_large, size=CONFIG.FILTER_SMALL_SCALE)
-                final_residual = residual_large - filtered_small
-                
-                # Write the processed FITS file
-                hdul[0].data = final_residual
-                hdul[0].header['PGC'] = gal_id
-                hdul[0].header['LIGHTSUB'] = f'MEDIAN_{CONFIG.FILTER_LARGE_SCALE[0]}_{CONFIG.FILTER_SMALL_SCALE[0]}'
-                hdul[0].header['DISTANCE'] = distance_mpc
-                hdul.writeto(final_image_name, overwrite=True)
-                logging.info(f"Generated filtered image: {final_image_name}")
-                
-        except Exception as e:
-            logging.error(f"Error processing image {fits_file}: {e}")
-            continue
+        if flt in expected_filters and not os.path.exists(final_image_name):
+            all_processed = False
+    
+    if all_processed and all(processed_images.get(f) for f in expected_filters):
+        logging.info(f"All processed images already exist. Skipping image processing for PGC {gal_id}.")
+    else:
+        # 1. Image Processing (Light Subtraction)
+        logging.info(f"Processing images for PGC {gal_id}...")
+        for fits_file in fits_files:
+            match = re.match(pattern, fits_file)
+            if not match:
+                continue
+            xxx, yyy, flt = match.groups()
+            
+            final_image_name = f'{flt}_fin_{xxx}.{yyy}.fits'
+            processed_images[flt] = final_image_name
 
-    # 2. Source Detection (SExtractor)
+            if os.path.exists(final_image_name):
+                logging.info(f"Processed image {final_image_name} already exists. Skipping filtering.")
+                continue
+            
+            try:
+                with fits.open(fits_file) as hdul:
+                    data = hdul[0].data
+                    
+                    # --- Light Subtraction using CONFIG parameters ---
+                    filtered_large = median_filter(data, size=CONFIG.FILTER_LARGE_SCALE)
+                    residual_large = data - filtered_large
+                    
+                    filtered_small = median_filter(residual_large, size=CONFIG.FILTER_SMALL_SCALE)
+                    final_residual = residual_large - filtered_small
+                    
+                    # Write the processed FITS file
+                    hdul[0].data = final_residual
+                    hdul[0].header['PGC'] = gal_id
+                    hdul[0].header['LIGHTSUB'] = f'MEDIAN_{CONFIG.FILTER_LARGE_SCALE[0]}_{CONFIG.FILTER_SMALL_SCALE[0]}'
+                    hdul[0].header['DISTANCE'] = distance_mpc
+                    hdul.writeto(final_image_name, overwrite=True)
+                    logging.info(f"Generated filtered image: {final_image_name}")
+                    
+            except Exception as e:
+                logging.error(f"Error processing image {fits_file}: {e}")
+                continue
+
+    # 2. Source Detection 
     r_img = processed_images.get('r')
     u_img = processed_images.get('u')
     g_img = processed_images.get('g')
     
     if not (r_img and u_img and g_img):
-        logging.error("Missing one or more processed FITS files (r, u, g). Cannot run SExtractor.")
-        os.chdir('..')
+        logging.error("Missing one or more processed FITS files (r, u, g). Cannot run DOLPHOT.")
+        os.chdir(original_dir)
         return
 
     cat_name = f'full_catalog_{gal_id}_{ra_sky:.4f}_{dec_sky:.4f}.cat'
     
-    detection_img = r_img
+    # DOLPHOT requires image names without .fits extension
+    detection_img_base = r_img.replace('.fits', '')
+    g_img_base = g_img.replace('.fits', '')
+    u_img_base = u_img.replace('.fits', '')
     
-    # Pass all filtered images for simultaneous measurement
-    measurement_imgs = f'{r_img},{u_img},{g_img}' 
-    
-    sex_command = [
-        'sex', detection_img, '-CATALOG_NAME', cat_name, 
-        '-CATALOG_TYPE', 'ASCII_HEAD',
-        '-MAG_ZEROPOINT', str(CONFIG.DEFAULT_MAG_ZEROPOINT),
-        '-GAIN', str(CONFIG.SEX_GAIN), 
-        '-PIXEL_SCALE', str(CONFIG.PIXEL_SCALE_CFIS),
-        '-SEEING_FWHM', str(CONFIG.DEFAULT_SEEING_FWHM),
-        '-DETECT_THRESH', str(CONFIG.SEX_DETECT_THRESH),
-        '-FILTER_NAME', CONFIG.SEX_FILTER_NAME,
-        '-CHECKIMAGE_TYPE', 'SEGMENTATION', 
-        '-C', CONFIG.SEX_CONFIG_FILE,
-        '-PARAMETERS_NAME', CONFIG.SEX_PARAM_FILE,
-        '-PHOT_APERTURES', str(CONFIG.SEX_APERTURE_SIZE),
-        '-MEASURE_TYPE', 'BOTH',
-        '-WEIGHT_TYPE', 'NONE',
-        '-FLAG_IMAGE', 'NONE',
-        '-BACK_TYPE', 'MANUAL',
-        '-BACK_VALUE', '0.0', # Background already subtracted
-        '-FITS_IMAGES', measurement_imgs # Specify all images for measurement
+    # Use DOLPHOT for detection 
+    dolphot_command = [
+        'dolphot', cat_name, '-p' + CONFIG.DOLPHOT_PARAM_FILE, 
+        'img1_file=' + detection_img_base,
+        'img2_file=' + g_img_base, 
+        'img3_file=' + u_img_base
     ]
 
     try:
-        subprocess.run(sex_command, check=True, capture_output=True)
-        logging.info(f'Successfully ran SExtractor. Catalog created: {cat_name}')
+        subprocess.run(dolphot_command, check=True, capture_output=True)
+        logging.info(f'Successfully ran DOLPHOT. Catalog created: {cat_name}')
     except subprocess.CalledProcessError as e:
-        logging.error(f"SExtractor failed: {e.cmd}. Error:\n{e.stderr.decode()}")
+        logging.error(f"DOLPHOT failed: {e.cmd}. Error:\n{e.stderr.decode()}")
         
-    os.chdir('..') # Return to the original directory
+    os.chdir(original_dir) # Return to the original directory
 
 def filter_globular_clusters(catalog_path, x_center_pix, y_center_pix, gal_id, distance_mpc):
     """
@@ -394,17 +390,20 @@ def generate_plots(folder, gal_id, ra_sky, dec_sky, distance_mpc, final_catalog)
         logging.warning(f"No GC candidates to plot for PGC {gal_id}.")
         return
 
-    plot_dir = 'plots'
+    # Get absolute path to plots directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, CONFIG.DATA_DIR)
+    plot_dir = os.path.join(data_dir, 'plots')
     
     # --- Plot 1: Color-Magnitude Diagram (CMD) ---
     fig_cmd, ax_cmd = plt.subplots(figsize=(7, 6))
     ax_cmd.scatter(final_catalog['U_R'], final_catalog['G_R'], s=15, c='darkorange', alpha=0.7)
     
-    # Annotate the expected GC region boundaries from config
-    ax_cmd.axvline(x=config.GC_U_R_MIN, color='blue', linestyle=':', alpha=0.5)
-    ax_cmd.axvline(x=config.GC_U_R_MAX, color='blue', linestyle=':', alpha=0.5)
-    ax_cmd.axhline(y=config.GC_G_R_MIN, color='red', linestyle=':', alpha=0.5)
-    ax_cmd.axhline(y=config.GC_G_R_MAX, color='red', linestyle=':', alpha=0.5)
+    # Annotate the expected GC region boundaries from CONFIG
+    ax_cmd.axvline(x=CONFIG.GC_U_R_MIN, color='blue', linestyle=':', alpha=0.5)
+    ax_cmd.axvline(x=CONFIG.GC_U_R_MAX, color='blue', linestyle=':', alpha=0.5)
+    ax_cmd.axhline(y=CONFIG.GC_G_R_MIN, color='red', linestyle=':', alpha=0.5)
+    ax_cmd.axhline(y=CONFIG.GC_G_R_MAX, color='red', linestyle=':', alpha=0.5)
 
 
     ax_cmd.set_xlabel('u - r (mag)', fontsize=12)
@@ -420,7 +419,7 @@ def generate_plots(folder, gal_id, ra_sky, dec_sky, distance_mpc, final_catalog)
     fig_rad, ax_rad = plt.subplots(figsize=(7, 6))
     
     # Convert radial distance from pixels to arcsec
-    final_catalog['RAD_ARCSEC'] = final_catalog['RAD_PIX'] * config.PIXEL_SCALE_CFIS
+    final_catalog['RAD_ARCSEC'] = final_catalog['RAD_PIX'] * CONFIG.PIXEL_SCALE_CFIS
     
     # Bin the radial distances
     ax_rad.hist(final_catalog['RAD_ARCSEC'], bins=20, histtype='step', 
@@ -464,7 +463,7 @@ def main():
     
     args = parser.parse_args()
     
-    print(f"--- Starting Globular Cluster Pipeline (Logging to {config.LOG_FILENAME}) ---")
+    print(f"--- Starting Globular Cluster Pipeline (Logging to {CONFIG.LOG_FILENAME}) ---")
     
     start_time = time.time()
 
@@ -494,8 +493,8 @@ def main():
         xxx_input_int, yyy_input_int = 0, 0
         try:
             # Iterate through the configured tile listing files
-            for listing_file in config.TILE_LISTINGS:
-                is_in_tile, xxx_input_int, yyy_input_int = in_unions(coords_ra, coords_dec, listing_file)
+            for listing_file in CONFIG.TILE_LISTINGS:
+                is_in_tile, xxx_input_int, yyy_input_int = in_UNIONS(coords_ra, coords_dec, listing_file)
                 if is_in_tile:
                     break # Found a tile, stop searching
 
@@ -508,8 +507,13 @@ def main():
 
             if yyy_input_int == 0 and yyy_input != '000':
                 yyy_input = '000'
-                
-            folder = os.path.join(os.getcwd(), f'CFIS.{xxx_input}.{yyy_input}')
+            
+            # Get absolute path for data directory
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            data_dir = os.path.join(script_dir, CONFIG.DATA_DIR)
+            os.makedirs(data_dir, exist_ok=True)
+            
+            folder = os.path.join(data_dir, f'CFIS.{xxx_input}.{yyy_input}')
             catalog_path = os.path.join(folder, f'full_catalog_{gal_id}_{coords_ra:.4f}_{coords_dec:.4f}.cat')
 
         except Exception as e:
@@ -576,6 +580,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if not os.path.exists('plots'):
-        os.makedirs('plots')
+    # Create plots directory in data folder
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, CONFIG.DATA_DIR)
+    plots_dir = os.path.join(data_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
     main()
